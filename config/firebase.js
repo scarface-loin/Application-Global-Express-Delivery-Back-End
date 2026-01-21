@@ -1,39 +1,66 @@
 const admin = require('firebase-admin');
+const fs = require('fs');
 const path = require('path');
 
-// Cette version du fichier utilise TOUJOURS le fichier de service account local.
-// La méthode par variables d'environnement a été retirée pour plus de simplicité.
+// Version optimisée pour Render avec Secret Files
 
 try {
-  // On construit le chemin vers le fichier de clé
-  const serviceAccountPath = path.join(__dirname, 'firebase-service-account.json');
+  let serviceAccount;
   
-  // On charge le fichier
-  const serviceAccount = require(serviceAccountPath);
-
-  // Vérification simple pour s'assurer que le fichier est valide
-  if (!serviceAccount.project_id) {
-    throw new Error('Le fichier firebase-service-account.json est invalide ou ne contient pas de "project_id".');
+  // Cherche d'abord dans /etc/secrets/ (emplacement Render pour Secret Files)
+  const renderSecretsPath = '/etc/secrets/firebase-service-account.json';
+  
+  if (fs.existsSync(renderSecretsPath)) {
+    // Mode Render avec Secret Files
+    console.log('🔐 Chargement depuis Render Secret Files...');
+    const serviceAccountData = fs.readFileSync(renderSecretsPath, 'utf8');
+    serviceAccount = JSON.parse(serviceAccountData);
+  } 
+  // Fallback pour développement local
+  else {
+    console.log('💻 Mode développement - Chargement depuis le fichier local...');
+    const localPath = path.join(__dirname, 'firebase-service-account.json');
+    
+    if (fs.existsSync(localPath)) {
+      serviceAccount = require(localPath);
+    } else {
+      throw new Error('Aucun fichier de configuration Firebase trouvé. Vérifiez :\n' +
+        '1. En production: Ajoutez "firebase-service-account.json" dans Render Secret Files\n' +
+        '2. En développement: Placez firebase-service-account.json dans le dossier config/');
+    }
   }
 
-  // Initialisation de Firebase avec les identifiants du fichier
+  // Vérification du service account
+  if (!serviceAccount.project_id) {
+    throw new Error('Le fichier de service account Firebase est invalide (project_id manquant).');
+  }
+
+  // Initialisation de Firebase
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
   });
   
-  console.log('✅ Firebase initialisé avec le fichier local firebase-service-account.json');
+  console.log(`✅ Firebase initialisé avec succès (Projet: ${serviceAccount.project_id})`);
 
 } catch (error) {
-  // Message d'erreur amélioré pour guider l'utilisateur
-  console.error('❌ Erreur critique lors de l\'initialisation de Firebase.');
-  console.error('   Message:', error.message);
-  console.error('\n💡 VÉRIFIEZ BIEN LES POINTS SUIVANTS :');
-  console.error('   1. Un fichier nommé "firebase-service-account.json" existe bien.');
-  console.error('   2. Il est placé dans le même dossier que ce fichier (back/config/).');
-  console.error('   3. Le fichier JSON que vous avez téléchargé de Firebase est complet et valide.');
+  console.error('❌ ERREUR FATALE: Impossible d\'initialiser Firebase');
+  console.error('Message:', error.message);
   
-  // On arrête le processus car l'application ne peut pas fonctionner sans Firebase
-  process.exit(1); 
+  console.error('\n🔧 CONFIGURATION REQUISE:');
+  console.error('========================================');
+  console.error('EN PRODUCTION (Render):');
+  console.error('1. Allez dans votre service sur Render');
+  console.error('2. Cliquez sur "Environment"');
+  console.error('3. Cliquez sur "Secret Files"');
+  console.error('4. Ajoutez un fichier nommé EXACTEMENT:');
+  console.error('   Nom: firebase-service-account.json');
+  console.error('   Contenu: Votre fichier JSON complet depuis Firebase Console');
+  console.error('\nEN DÉVELOPPEMENT:');
+  console.error('1. Placez firebase-service-account.json dans /back/config/');
+  console.error('   OU');
+  console.error('2. Utilisez les variables d\'environnement (voir documentation)');
+  
+  process.exit(1);
 }
 
 const db = admin.firestore();
