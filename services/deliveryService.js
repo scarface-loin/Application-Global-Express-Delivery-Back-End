@@ -326,8 +326,8 @@ class DeliveryService {
     return Delivery.fromFirestore(doc);
   }
 
-  // ==================== Accepter une livraison ====================
-  static async acceptDelivery(deliveryId, deliveryManId) {
+  // ==================== MODIFIÉ : Commencer une livraison ====================
+  static async startDelivery(deliveryId, deliveryManId) {
     const deliveryRef = db.collection('deliveries').doc(deliveryId);
     const doc = await deliveryRef.get();
 
@@ -342,16 +342,31 @@ class DeliveryService {
     }
 
     if (delivery.status !== 'assigned') {
-      throw new Error('Cette livraison ne peut pas être acceptée');
+      throw new Error('Cette livraison ne peut pas être commencée');
     }
 
     await deliveryRef.update({
-      status: 'accepted',
-      acceptedAt: new Date(),
+      status: 'in_progress',
+      startedAt: new Date(),
       updatedAt: new Date()
     });
 
-    return { message: 'Livraison acceptée avec succès' };
+    // Notifier l'admin que le livreur a commencé
+    const admins = await db.collection('users')
+      .where('role', '==', 'admin')
+      .get();
+
+    for (const adminDoc of admins.docs) {
+      await NotificationService.createNotification({
+        userId: adminDoc.id,
+        title: 'Livraison commencée',
+        body: `${delivery.deliveryManName} a commencé la livraison`,
+        type: 'delivery_started',
+        data: { deliveryId }
+      });
+    }
+
+    return { message: 'Livraison commencée avec succès' };
   }
 
   // ==================== Mettre à jour le statut d'une livraison ====================
@@ -369,6 +384,20 @@ class DeliveryService {
       throw new Error('Accès refusé');
     }
 
+    // Valider les transitions d'états
+    const validTransitions = {
+      'assigned': ['in_progress', 'cancelled'],
+      'in_progress': ['delivered', 'transferred', 'failed', 'issue_reported'],
+      'delivered': [],
+      'transferred': [],
+      'failed': [],
+      'cancelled': []
+    };
+
+    if (!validTransitions[delivery.status]?.includes(status)) {
+      throw new Error(`Transition de statut invalide: ${delivery.status} → ${status}`);
+    }
+
     const updateData = {
       status,
       updatedAt: new Date()
@@ -376,15 +405,43 @@ class DeliveryService {
 
     if (status === 'delivered') {
       updateData.completedAt = new Date();
+      updateData.deliveredAt = new Date();
+    } else if (status === 'transferred') {
+      updateData.transferredAt = new Date();
+    } else if (status === 'failed') {
+      updateData.failedAt = new Date();
     }
 
     await deliveryRef.update(updateData);
+
+    // Notifier l'admin des changements importants
+    if (['delivered', 'transferred', 'failed'].includes(status)) {
+      const admins = await db.collection('users')
+        .where('role', '==', 'admin')
+        .get();
+
+      for (const adminDoc of admins.docs) {
+        await NotificationService.createNotification({
+          userId: adminDoc.id,
+          title: 'Statut de livraison mis à jour',
+          body: `Livraison ${deliveryId} : ${status}`,
+          type: 'delivery_status_updated',
+          data: { deliveryId, status }
+        });
+      }
+    }
 
     return { message: 'Statut mis à jour' };
   }
 
   // ==================== Mettre à jour le statut d'un colis ====================
-  static async updatePackageStatus(deliveryId, packageId, deliveryManId, status) {
+  // Dans votre fichier de service (ex: DeliveryService.js)
+
+  static async updatePackageStatus(deliveryId, packageId, deliveryManId, updateData) { // ✅ CORRECTION 1: On reçoit un objet "updateData"
+
+    // ✅ CORRECTION 2: On extrait les informations de l'objet
+    const { status, rejectionReason } = updateData;
+
     const deliveryRef = db.collection('deliveries').doc(deliveryId);
     const doc = await deliveryRef.get();
 
@@ -400,17 +457,45 @@ class DeliveryService {
 
     const packages = delivery.packages.map(pkg => {
       if (pkg.id === packageId) {
-        return { ...pkg, status, updatedAt: new Date() };
+        // ✅ CORRECTION 3: On construit le colis mis à jour correctement
+        const updatedPackage = {
+          ...pkg,
+          status, // On utilise le statut extrait
+          updatedAt: new Date()
+        };
+
+        // On ajoute la raison du rejet SEULEMENT si elle existe
+        if (rejectionReason) {
+          updatedPackage.rejectionReason = rejectionReason;
+        }
+
+        return updatedPackage;
       }
       return pkg;
     });
 
-    await deliveryRef.update({
+    // Le reste de la logique est correct et fonctionnera maintenant
+    const allDelivered = packages.every(pkg =>
+      pkg.status === 'delivered' || pkg.status === 'transferred'
+    );
+
+    const dataToUpdate = {
       packages,
       updatedAt: new Date()
-    });
+    };
 
-    return { message: 'Statut du colis mis à jour' };
+    if (allDelivered && delivery.deliveryType === 'local') {
+      dataToUpdate.status = 'delivered';
+      dataToUpdate.completedAt = new Date();
+    } else if (allDelivered && delivery.deliveryType === 'transfer') {
+      dataToUpdate.status = 'transferred';
+    }
+
+    await deliveryRef.update(dataToUpdate);
+
+    // On peut retourner le document mis à jour pour être plus cohérent
+    const updatedDoc = await deliveryRef.get();
+    return updatedDoc.data();
   }
 
   // ==================== Obtenir les livraisons disponibles ====================
@@ -426,18 +511,15 @@ class DeliveryService {
   // ==================== Obtenir les livraisons assignées ====================
   static async getAssignedDeliveries() {
     const snapshot = await db.collection('deliveries')
-      .where('status', 'in', ['assigned', 'accepted', 'in_progress'])
+      .where('status', 'in', ['assigned', 'in_progress'])
       .orderBy('assignedAt', 'desc')
       .get();
 
     return snapshot.docs.map(doc => Delivery.fromFirestore(doc));
   }
 
-
-  // A ajouter dans DeliveryService :
-
+  // ==================== Signaler un problème ====================
   static async reportDeliveryIssue(deliveryId, deliveryManId, issueData) {
-    // Vérifier les permissions
     const deliveryRef = db.collection('deliveries').doc(deliveryId);
     const doc = await deliveryRef.get();
 
@@ -459,18 +541,25 @@ class DeliveryService {
       updatedAt: new Date()
     });
 
-    // Notifier l'admin
-    await NotificationService.createNotification({
-      userId: 'admin', // À remplacer par l'ID de l'admin
-      title: 'Problème signalé',
-      body: `Problème signalé sur la livraison ${deliveryId}`,
-      type: 'delivery_issue',
-      data: { deliveryId, issueData }
-    });
+    // Notifier tous les admins
+    const admins = await db.collection('users')
+      .where('role', '==', 'admin')
+      .get();
+
+    for (const adminDoc of admins.docs) {
+      await NotificationService.createNotification({
+        userId: adminDoc.id,
+        title: 'Problème signalé',
+        body: `Problème signalé sur la livraison ${deliveryId}`,
+        type: 'delivery_issue',
+        data: { deliveryId, issueData }
+      });
+    }
 
     return { message: 'Problème signalé avec succès' };
   }
 
+  // ==================== Statistiques du livreur ====================
   static async getDeliveryManStats(deliveryManId) {
     const deliveriesRef = db.collection('deliveries');
 
@@ -489,6 +578,10 @@ class DeliveryService {
       thisMonth: 0
     };
 
+    const now = new Date();
+    const startOfWeek = new Date(now.setDate(now.getDate() - now.getDay()));
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
     snapshot.forEach(doc => {
       const delivery = doc.data();
       stats.total++;
@@ -496,7 +589,11 @@ class DeliveryService {
       if (delivery.status === 'delivered' || delivery.status === 'transferred') {
         stats.completed++;
         stats.totalAmount += delivery.totalAmount || 0;
-      } else if (delivery.status === 'accepted' || delivery.status === 'assigned') {
+
+        const completedAt = delivery.completedAt?.toDate();
+        if (completedAt >= startOfWeek) stats.thisWeek++;
+        if (completedAt >= startOfMonth) stats.thisMonth++;
+      } else if (delivery.status === 'assigned') {
         stats.pending++;
       } else if (delivery.status === 'in_progress') {
         stats.inProgress++;
@@ -505,9 +602,143 @@ class DeliveryService {
 
     return stats;
   }
+
+
+  // ==================== Endpoint A : Récupérer le bilan de réconciliation ====================
+  static async getReconciliationSummary(deliveryManId) {
+    try {
+      // Récupérer toutes les livraisons du livreur
+      const deliveriesSnapshot = await db.collection('deliveries')
+        .where('deliveryManId', '==', deliveryManId)
+        .get();
+
+      const cashItems = [];
+      const returnItems = [];
+      let totalCashAmount = 0;
+
+      deliveriesSnapshot.forEach(doc => {
+        const delivery = doc.data();
+        const deliveryId = doc.id;
+
+        // Parcourir les packages de chaque livraison
+        delivery.packages.forEach(pkg => {
+          // ✅ CASH : Livraisons livrées ou transférées mais non versées
+          if (
+            (pkg.status === 'delivered' || pkg.status === 'transferred') &&
+            delivery.settlementStatus !== 'completed'
+          ) {
+            const amount = parseFloat(pkg.amount) || 0;
+            totalCashAmount += amount;
+
+            cashItems.push({
+              deliveryId,
+              packageId: pkg.id,
+              trackingNumber: pkg.trackingNumber,
+              amount,
+              clientName: pkg.recipient,
+              completedAt: delivery.completedAt || delivery.transferredAt
+            });
+          }
+
+          // ✅ RETURNS : Colis échoués ou annulés non retournés
+          if (
+            (pkg.status === 'failed' || pkg.status === 'cancelled') &&
+            pkg.returnStatus !== 'returned_to_agency'
+          ) {
+            returnItems.push({
+              packageId: pkg.id,
+              trackingNumber: pkg.trackingNumber,
+              recipient: pkg.recipient,
+              destination: pkg.destination,
+              reason: pkg.rejectionReason || 'Non spécifié',
+              status: pkg.status
+            });
+          }
+        });
+      });
+
+      return {
+        success: true,
+        data: {
+          cash: {
+            totalAmount: totalCashAmount,
+            currency: 'XAF',
+            count: cashItems.length,
+            items: cashItems
+          },
+          returns: {
+            count: returnItems.length,
+            items: returnItems
+          }
+        }
+      };
+    } catch (error) {
+      console.error('Erreur réconciliation:', error);
+      throw new Error('Erreur lors de la récupération du bilan de réconciliation');
+    }
+  }
+
+  // ==================== Endpoint B : Demander la clôture ====================
+  static async requestReconciliation(deliveryManId, declaredAmount) {
+    try {
+      // Vérifier le montant réel à verser
+      const summary = await this.getReconciliationSummary(deliveryManId);
+      const actualAmount = summary.data.cash.totalAmount;
+
+      // Créer une demande de réconciliation
+      const reconciliationRequest = {
+        deliveryManId,
+        declaredAmount: parseFloat(declaredAmount),
+        actualAmount,
+        difference: actualAmount - parseFloat(declaredAmount),
+        status: 'pending', // pending | approved | rejected
+        requestedAt: new Date(),
+        cashItems: summary.data.cash.items,
+        returnItems: summary.data.returns.items
+      };
+
+      // Sauvegarder la demande
+      const requestRef = await db.collection('reconciliation_requests').add(reconciliationRequest);
+
+      // Notifier tous les admins
+      const admins = await db.collection('users')
+        .where('role', '==', 'admin')
+        .get();
+
+      const deliveryManDoc = await db.collection('users').doc(deliveryManId).get();
+      const deliveryManName = deliveryManDoc.data()?.name || 'Livreur';
+
+      for (const adminDoc of admins.docs) {
+        await NotificationService.createNotification({
+          userId: adminDoc.id,
+          title: 'Demande de clôture',
+          body: `${deliveryManName} demande une clôture de caisse (${declaredAmount} XAF)`,
+          type: 'reconciliation_request',
+          data: {
+            requestId: requestRef.id,
+            deliveryManId,
+            declaredAmount,
+            actualAmount
+          }
+        });
+      }
+
+      return {
+        success: true,
+        message: 'Demande de clôture envoyée avec succès',
+        data: {
+          requestId: requestRef.id,
+          declaredAmount: parseFloat(declaredAmount),
+          actualAmount,
+          difference: actualAmount - parseFloat(declaredAmount),
+          status: 'pending'
+        }
+      };
+    } catch (error) {
+      console.error('Erreur demande réconciliation:', error);
+      throw new Error('Erreur lors de la demande de clôture');
+    }
+  }
 }
-
-
-
 
 module.exports = DeliveryService;

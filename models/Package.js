@@ -1,18 +1,18 @@
-
-// ==================== src/models/Package.js (VERSION MISE À JOUR) ====================
 class Package {
   constructor({
     id,
     trackingNumber,
     recipient,
     recipientPhone,
-    destination, // Adresse complète ou ville de destination
-    isOutOfTown = false, // Indique si c'est un transfert
-    agencyName = null, // Nom de l'agence pour les transferts
+    destination,
+    isOutOfTown = false,
+    agencyName = null,
     status = 'pending',
+    returnStatus = 'not_returned', // ✅ NOUVEAU CHAMP
+    rejectionReason = null, // ✅ NOUVEAU (pour failed/cancelled)
     amount = 0,
-    weight = null, // Poids du colis
-    description = '', // Description du contenu
+    weight = null,
+    description = '',
     createdAt = new Date(),
     updatedAt = new Date()
   }) {
@@ -24,6 +24,9 @@ class Package {
     this.isOutOfTown = isOutOfTown;
     this.agencyName = agencyName;
     this.status = status;
+    this.amount = amount;
+    this.returnStatus = returnStatus; // ✅ NOUVEAU
+    this.rejectionReason = rejectionReason; // ✅ NOUVEAU
     this.amount = amount;
     this.weight = weight;
     this.description = description;
@@ -41,6 +44,8 @@ class Package {
       isOutOfTown: this.isOutOfTown,
       agencyName: this.agencyName,
       status: this.status,
+      returnStatus: this.returnStatus, // ✅ NOUVEAU
+      rejectionReason: this.rejectionReason, // ✅ NOUVEAU
       amount: this.amount,
       weight: this.weight,
       description: this.description,

@@ -9,8 +9,9 @@ class Delivery {
     packages = [],
     deliveryType = 'local',
     status = DELIVERY_STATUS.PENDING,
+    settlementStatus = 'pending',
     assignedAt = null,
-    acceptedAt = null,
+    startedAt = null,
     completedAt = null,
     transferredAt = null,
     receiptUrl = null,
@@ -18,7 +19,8 @@ class Delivery {
     updatedAt = new Date(),
     totalAmount = 0,
     notes = '',
-    clientInfo = {}
+    clientInfo = {},
+    issues = []
   }) {
     this.id = id;
     this.deliveryManId = deliveryManId;
@@ -26,8 +28,9 @@ class Delivery {
     this.packages = packages;
     this.deliveryType = deliveryType;
     this.status = status;
+    this.settlementStatus = settlementStatus;
     this.assignedAt = assignedAt;
-    this.acceptedAt = acceptedAt;
+    this.startedAt = startedAt;
     this.completedAt = completedAt;
     this.transferredAt = transferredAt;
     this.receiptUrl = receiptUrl;
@@ -40,6 +43,7 @@ class Delivery {
       phone: clientInfo.phone || '',
       address: clientInfo.address || ''
     };
+    this.issues = issues || [];
   }
 
   // === Vérifier et mettre à jour le statut ===
@@ -88,13 +92,17 @@ class Delivery {
         this.completedAt = this.completedAt || new Date();
       }
     } else if (hasInProgressPackages) {
+      // Au moins un colis en cours de livraison
       this.status = DELIVERY_STATUS.IN_PROGRESS;
-    } else if (hasPendingPackages) {
-      this.status = DELIVERY_STATUS.PENDING;
-    } else if (this.packages.some(pkg => pkg.status === PACKAGE_STATUS.PICKED_UP)) {
-      this.status = DELIVERY_STATUS.ACCEPTED;
-    } else if (this.deliveryManId && !this.acceptedAt) {
+    } else if (this.startedAt) {
+      // Le livreur a commencé mais aucun colis n'est encore en transit
+      this.status = DELIVERY_STATUS.IN_PROGRESS;
+    } else if (this.deliveryManId && this.assignedAt) {
+      // Assignée à un livreur mais pas encore commencée
       this.status = DELIVERY_STATUS.ASSIGNED;
+    } else if (hasPendingPackages) {
+      // Colis en attente, pas encore assignée
+      this.status = DELIVERY_STATUS.PENDING;
     }
 
     this.updatedAt = new Date();
@@ -177,6 +185,33 @@ class Delivery {
     return summary;
   }
 
+  // === Vérifier si le livreur peut commencer ===
+  canStart() {
+    return this.status === DELIVERY_STATUS.ASSIGNED && 
+           this.deliveryManId !== null;
+  }
+
+  // === Commencer la livraison ===
+  startDelivery() {
+    if (!this.canStart()) {
+      throw new AppError('Cette livraison ne peut pas être commencée', 400);
+    }
+    
+    this.status = DELIVERY_STATUS.IN_PROGRESS;
+    this.startedAt = new Date();
+    this.updatedAt = new Date();
+  }
+
+  // === Signaler un problème ===
+  reportIssue(issueData) {
+    this.issues.push({
+      ...issueData,
+      reportedAt: new Date()
+    });
+    this.status = DELIVERY_STATUS.ISSUE_REPORTED;
+    this.updatedAt = new Date();
+  }
+
   // === Préparer pour Firestore ===
   toFirestore() {
     // Vérifier et mettre à jour le statut avant de sauvegarder
@@ -208,8 +243,9 @@ class Delivery {
       })),
       deliveryType: this.deliveryType,
       status: this.status,
+      settlementStatus: this.settlementStatus,
       assignedAt: this.assignedAt,
-      acceptedAt: this.acceptedAt,
+      startedAt: this.startedAt,
       completedAt: this.completedAt,
       transferredAt: this.transferredAt,
       receiptUrl: this.receiptUrl,
@@ -217,7 +253,8 @@ class Delivery {
       updatedAt: this.updatedAt,
       totalAmount: this.totalAmount,
       notes: this.notes,
-      clientInfo: this.clientInfo
+      clientInfo: this.clientInfo,
+      issues: this.issues
     };
   }
 

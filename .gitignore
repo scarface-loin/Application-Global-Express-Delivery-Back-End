@@ -1,3 +1,6 @@
+# Dépendances
+/node_modules
+
 # Firebase credentials
 config/firebase-service-account.json
 

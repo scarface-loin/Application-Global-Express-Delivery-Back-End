@@ -477,4 +477,143 @@ router.get('/deliveries-assigned', async (req, res, next) => {
   }
 });
 
+
+
+// ==================== À AJOUTER DANS src/routes/admin.routes.js ====================
+// ⚠️ Ajouter cet import en haut du fichier après les autres imports
+const AdminReconciliationService = require('../services/adminReconciliationService');
+
+// ==================== ROUTES DE RÉCONCILIATION (CAISSE & VERSEMENTS) ====================
+// ⚠️ Ajouter ces routes AVANT "module.exports = router;" à la fin du fichier
+
+// 1. Liste des livreurs avec solde positif
+router.get('/reconciliation/drivers', async (req, res, next) => {
+  try {
+    const result = await AdminReconciliationService.getDriversWithPendingSettlement();
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 2. Détails du versement d'un livreur
+router.get('/reconciliation/drivers/:driverId/details', async (req, res, next) => {
+  try {
+    const result = await AdminReconciliationService.getDriverSettlementDetails(
+      req.params.driverId
+    );
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 3. Valider le versement d'un livreur
+router.post('/reconciliation/settle', async (req, res, next) => {
+  try {
+    const { driverId, amountCollected, confirmReturns } = req.body;
+
+    // Validation
+    if (!driverId) {
+      return res.status(400).json({
+        success: false,
+        error: 'L\'ID du livreur est requis'
+      });
+    }
+
+    if (!amountCollected || isNaN(amountCollected) || amountCollected < 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Le montant collecté est requis et doit être un nombre positif'
+      });
+    }
+
+    const result = await AdminReconciliationService.settleDriverPayment(
+      req.user.userId, // Admin qui effectue l'opération
+      driverId,
+      parseFloat(amountCollected),
+      confirmReturns !== false // Par défaut true
+    );
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 4. BONUS : Historique des versements
+router.get('/reconciliation/history', async (req, res, next) => {
+  try {
+    const { driverId, startDate, endDate } = req.query;
+
+    const result = await AdminReconciliationService.getSettlementHistory(
+      driverId || null,
+      startDate ? new Date(startDate) : null,
+      endDate ? new Date(endDate) : null
+    );
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 5. BONUS : Statistiques de réconciliation
+router.get('/reconciliation/stats', async (req, res, next) => {
+  try {
+    const driversResult = await AdminReconciliationService.getDriversWithPendingSettlement();
+    
+    // Statistiques supplémentaires
+    const settlementHistorySnapshot = await db.collection('settlement_history')
+      .orderBy('settledAt', 'desc')
+      .limit(10)
+      .get();
+
+    const recentSettlements = settlementHistorySnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+
+    // Calculer les stats du mois en cours
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const monthlySnapshot = await db.collection('settlement_history')
+      .where('settledAt', '>=', startOfMonth)
+      .get();
+
+    let monthlyTotal = 0;
+    let monthlyCount = 0;
+
+    monthlySnapshot.forEach(doc => {
+      const data = doc.data();
+      monthlyTotal += data.amountCollected || 0;
+      monthlyCount++;
+    });
+
+    res.json({
+      success: true,
+      data: {
+        pending: driversResult.summary,
+        thisMonth: {
+          totalSettlements: monthlyCount,
+          totalAmount: monthlyTotal,
+          averageAmount: monthlyCount > 0 ? monthlyTotal / monthlyCount : 0
+        },
+        recentSettlements: recentSettlements.slice(0, 5).map(s => ({
+          id: s.id,
+          driverId: s.driverId,
+          amount: s.amountCollected,
+          settledAt: s.settledAt
+        }))
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ==================== FIN DES ROUTES DE RÉCONCILIATION ====================
+
 module.exports = router;

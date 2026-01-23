@@ -64,11 +64,21 @@ const schemas = {
     newPassword: Joi.string().min(4).required()
   }),
 
+  // MODIFIÉ : Suppression de 'accepted', ajout de 'failed' et 'issue_reported'
   updateDeliveryStatus: Joi.object({
     status: Joi.string().valid(
-      'pending', 'assigned', 'accepted',
-      'in_progress', 'delivered', 'cancelled', 'transferred'
+      'pending',
+      'assigned',
+      'in_progress',
+      'delivered',
+      'transferred',
+      'failed',
+      'issue_reported',
+      'cancelled'
     ).required()
+      .messages({
+        'any.only': 'Statut invalide. Statuts autorisés : pending, assigned, in_progress, delivered, transferred, failed, issue_reported, cancelled'
+      })
   }),
 
   assignDelivery: Joi.object({
@@ -101,6 +111,46 @@ const schemas = {
       })
     ).required(),
     notes: Joi.string().allow('', null).optional()
+  }),
+
+  // AJOUTÉ : Validation pour signaler un problème
+  reportIssue: Joi.object({
+    issueType: Joi.string().valid(
+      'address_not_found',
+      'recipient_unavailable',
+      'refused_delivery',
+      'damaged_package',
+      'wrong_address',
+      'other'
+    ).required()
+      .messages({
+        'any.only': 'Type de problème invalide'
+      }),
+    description: Joi.string().min(10).max(500).required()
+      .messages({
+        'string.min': 'La description doit contenir au moins 10 caractères',
+        'string.max': 'La description ne peut pas dépasser 500 caractères'
+      })
+  }),
+
+  // AJOUTÉ : Validation pour mettre à jour le statut d'un colis
+  updatePackageStatus: Joi.object({
+    status: Joi.string().valid(
+      'pending',
+      'picked_up',
+      'in_transit',
+      'delivered',
+      'failed',
+      'transferred',
+      'at_agency'
+    ).required()
+      .messages({
+        'any.only': 'Statut de colis invalide. Statuts autorisés : pending, picked_up, in_transit, delivered, failed, transferred, at_agency'
+      }),
+    notes: Joi.string().max(500).optional(),
+    rejectionReason: Joi.string().max(500).optional(),
+    recipientSignature: Joi.string().optional(),
+    deliveryProof: Joi.string().optional()
   })
 };
 
