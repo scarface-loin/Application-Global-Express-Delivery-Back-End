@@ -10,6 +10,7 @@ const { authenticateToken, requireRole } = require('../middleware/auth');
 const { validateRequest, schemas } = require('../middleware/validation');
 const { ROLES } = require('../config/constants');
 const User = require('../models/User');
+const DebtController = require('../controllers/debtController');
 
 // ==================== ROUTE PUBLIQUE POUR CRÉER LE PREMIER ADMIN ====================
 router.post('/create-first-admin', async (req, res, next) => {
@@ -615,5 +616,34 @@ router.get('/reconciliation/stats', async (req, res, next) => {
 });
 
 // ==================== FIN DES ROUTES DE RÉCONCILIATION ====================
+// ==================== AJOUTER CES IMPORTS EN HAUT DU FICHIER ====================
+
+
+// ==================== AJOUTER CES ROUTES AVANT "module.exports = router;" ====================
+
+// ==================== ROUTES DE GESTION DES DETTES ====================
+
+// 1. Obtenir toutes les dettes en attente (admin)
+router.get('/debts/pending', DebtController.getAllPendingDebts);
+
+// 2. Obtenir les statistiques des dettes (admin)
+router.get('/debts/statistics', DebtController.getDebtStatistics);
+
+// 3. Obtenir les dettes d'un livreur spécifique
+router.get('/debts/driver/:driverId', DebtController.getDriverDebts);
+
+// 4. Obtenir l'historique des dettes d'un livreur
+router.get('/debts/driver/:driverId/history', DebtController.getDriverDebtHistory);
+
+// 5. Obtenir le solde de dette actuel d'un livreur
+router.get('/debts/driver/:driverId/balance', DebtController.getDriverDebtBalance);
+
+// 6. Marquer une dette comme payée
+router.patch('/debts/:debtId/mark-paid', DebtController.markDebtAsPaid);
+
+// 7. Annuler une dette (cas exceptionnel)
+router.patch('/debts/:debtId/cancel', DebtController.cancelDebt);
+
+// ==================== FIN DES ROUTES DE GESTION DES DETTES ====================
 
 module.exports = router;

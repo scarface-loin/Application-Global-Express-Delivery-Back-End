@@ -12,7 +12,9 @@ class User {
     fcmToken = null,
     mustChangePassword = false,
     settings = {},
-    documents = {}
+    documents = {},
+    debtBalance = 0,
+    lastDebtUpdate = null
   }) {
     this.id = id;
     this.name = name;
@@ -35,6 +37,8 @@ class User {
       contract: null,
       ...documents
     };
+    this.debtBalance = debtBalance;
+    this.lastDebtUpdate = lastDebtUpdate;
   }
 
   toFirestore() {
@@ -49,7 +53,9 @@ class User {
       fcmToken: this.fcmToken,
       mustChangePassword: this.mustChangePassword,
       settings: this.settings,
-      documents: this.documents
+      documents: this.documents,
+      debtBalance: this.debtBalance,
+      lastDebtUpdate: this.lastDebtUpdate
     };
   }
 
@@ -75,6 +81,16 @@ class User {
     if (!this.documents.cni) missing.push('cni');
     if (!this.documents.contract) missing.push('contract');
     return missing;
+  }
+
+  // Vérifier si le livreur a des dettes
+  hasDebt() {
+    return this.debtBalance > 0;
+  }
+
+  // Obtenir le solde de dette formaté
+  getFormattedDebt() {
+    return `${this.debtBalance.toLocaleString('fr-FR')} XAF`;
   }
 }
 

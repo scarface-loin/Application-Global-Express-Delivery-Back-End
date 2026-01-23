@@ -74,6 +74,9 @@ class AdminReconciliationService {
           lastSettlementRequest = reconciliationSnapshot.docs[0].data().requestedAt;
         }
 
+        // Récupérer le solde de dette du livreur
+        const driverDebt = driverData.debtBalance || 0;
+
         // Ajouter seulement si le livreur a un solde ou des retours
         if (cashInHand > 0 || pendingReturns > 0) {
           driversWithBalance.push({
@@ -84,6 +87,7 @@ class AdminReconciliationService {
             cashInHand,
             deliveredCount,
             pendingReturns,
+            debtBalance: driverDebt,
             lastDeliveryDate,
             lastSettlementRequest,
             hasPendingRequest: !!lastSettlementRequest
@@ -100,7 +104,8 @@ class AdminReconciliationService {
         summary: {
           totalDrivers: driversWithBalance.length,
           totalCashInHand: driversWithBalance.reduce((sum, d) => sum + d.cashInHand, 0),
-          totalPendingReturns: driversWithBalance.reduce((sum, d) => sum + d.pendingReturns, 0)
+          totalPendingReturns: driversWithBalance.reduce((sum, d) => sum + d.pendingReturns, 0),
+          totalDebt: driversWithBalance.reduce((sum, d) => sum + d.debtBalance, 0)
         }
       };
     } catch (error) {
@@ -204,6 +209,7 @@ class AdminReconciliationService {
             totalCash,
             deliveredCount: cashDetails.length,
             pendingReturns: returnDetails.length,
+            currentDebt: driverData.debtBalance || 0,
             pendingRequest
           },
           cashDetails,
@@ -216,19 +222,27 @@ class AdminReconciliationService {
     }
   }
 
-  // ==================== 3. Valider le versement ====================
+  // ==================== 3. Valider le versement avec gestion des dettes ====================
   static async settleDriverPayment(adminId, driverId, amountCollected, confirmReturns = true) {
     try {
       // 1. Récupérer les détails pour validation
       const details = await this.getDriverSettlementDetails(driverId);
       const actualAmount = details.data.summary.totalCash;
+      const currentDebt = details.data.summary.currentDebt;
 
-      // 2. Vérifier la correspondance des montants (tolérance de 100 XAF)
-      const difference = Math.abs(actualAmount - amountCollected);
-      if (difference > 100) {
-        throw new Error(
-          `Montant collecté (${amountCollected} XAF) ne correspond pas au montant attendu (${actualAmount} XAF). Différence: ${difference} XAF`
-        );
+      // 2. Calculer la différence (dette si négatif, trop-perçu si positif)
+      const difference = actualAmount - amountCollected;
+      let newDebtAmount = 0;
+      let debtAction = null;
+
+      if (difference > 0) {
+        // Le livreur a versé MOINS que prévu → Dette
+        newDebtAmount = difference;
+        debtAction = 'added';
+      } else if (difference < 0) {
+        // Le livreur a versé PLUS que prévu → Excédent (on enregistre mais pas de dette)
+        newDebtAmount = 0;
+        debtAction = 'overpayment';
       }
 
       // 3. Récupérer toutes les livraisons concernées
@@ -297,7 +311,11 @@ class AdminReconciliationService {
         adminId,
         amountCollected,
         actualAmount,
-        difference: actualAmount - amountCollected,
+        difference,
+        debtGenerated: newDebtAmount,
+        debtAction,
+        previousDebt: currentDebt,
+        newTotalDebt: currentDebt + newDebtAmount,
         deliveriesSettled,
         packagesSettled,
         returnsProcessed,
@@ -310,7 +328,31 @@ class AdminReconciliationService {
       const settlementRef = db.collection('settlement_history').doc();
       batch.set(settlementRef, settlementRecord);
 
-      // 6. Mettre à jour les demandes de réconciliation en attente
+      // 6. Mettre à jour le solde de dette du livreur
+      if (newDebtAmount > 0) {
+        const driverRef = db.collection('users').doc(driverId);
+        batch.update(driverRef, {
+          debtBalance: (currentDebt + newDebtAmount),
+          lastDebtUpdate: new Date(),
+          updatedAt: new Date()
+        });
+
+        // 7. Créer un enregistrement de dette
+        const debtRef = db.collection('driver_debts').doc();
+        batch.set(debtRef, {
+          driverId,
+          amount: newDebtAmount,
+          reason: 'settlement_shortage',
+          settlementId: settlementRef.id,
+          expectedAmount: actualAmount,
+          collectedAmount: amountCollected,
+          status: 'pending',
+          createdAt: new Date(),
+          createdBy: adminId
+        });
+      }
+
+      // 8. Mettre à jour les demandes de réconciliation en attente
       const reconciliationSnapshot = await db.collection('reconciliation_requests')
         .where('deliveryManId', '==', driverId)
         .where('status', '==', 'pending')
@@ -325,18 +367,30 @@ class AdminReconciliationService {
         });
       });
 
-      // 7. Exécuter toutes les mises à jour
+      // 9. Exécuter toutes les mises à jour
       await batch.commit();
 
-      // 8. Notifier le livreur
+      // 10. Notifier le livreur
+      let notificationBody = `Votre versement de ${amountCollected} XAF a été validé`;
+      
+      if (newDebtAmount > 0) {
+        notificationBody += `. Une différence de ${newDebtAmount} XAF a été enregistrée comme dette et sera prélevée sur votre salaire`;
+      } else if (difference < 0) {
+        notificationBody += `. Vous avez versé ${Math.abs(difference)} XAF de plus que prévu`;
+      }
+
       await NotificationService.createNotification({
         userId: driverId,
-        title: 'Versement validé',
-        body: `Votre versement de ${amountCollected} XAF a été validé par l'administrateur`,
-        type: 'settlement_approved',
+        title: newDebtAmount > 0 ? 'Versement validé - Dette enregistrée' : 'Versement validé',
+        body: notificationBody,
+        type: newDebtAmount > 0 ? 'settlement_with_debt' : 'settlement_approved',
         data: {
           settlementId: settlementRef.id,
           amountCollected,
+          expectedAmount: actualAmount,
+          difference,
+          debtGenerated: newDebtAmount,
+          newTotalDebt: currentDebt + newDebtAmount,
           packagesSettled,
           returnsProcessed
         }
@@ -344,13 +398,18 @@ class AdminReconciliationService {
 
       return {
         success: true,
-        message: 'Versement validé avec succès',
+        message: newDebtAmount > 0 
+          ? `Versement validé avec une dette de ${newDebtAmount} XAF enregistrée`
+          : 'Versement validé avec succès',
         data: {
           settlementId: settlementRef.id,
           driverId,
-          amountSettled: amountCollected,
-          actualAmount,
-          difference: actualAmount - amountCollected,
+          amountCollected,
+          expectedAmount: actualAmount,
+          difference,
+          debtGenerated: newDebtAmount,
+          previousDebt: currentDebt,
+          newTotalDebt: currentDebt + newDebtAmount,
           deliveriesSettled,
           packagesSettled,
           returnsProcessed,
@@ -363,7 +422,7 @@ class AdminReconciliationService {
     }
   }
 
-  // ==================== BONUS: Historique des versements ====================
+  // ==================== 4. Historique des versements ====================
   static async getSettlementHistory(driverId = null, startDate = null, endDate = null) {
     try {
       let query = db.collection('settlement_history');
@@ -408,12 +467,68 @@ class AdminReconciliationService {
         data: history,
         summary: {
           totalSettlements: history.length,
-          totalAmount: history.reduce((sum, s) => sum + s.amountCollected, 0)
+          totalAmount: history.reduce((sum, s) => sum + s.amountCollected, 0),
+          totalDebtGenerated: history.reduce((sum, s) => sum + (s.debtGenerated || 0), 0)
         }
       };
     } catch (error) {
       console.error('Erreur historique versements:', error);
       throw new Error('Erreur lors de la récupération de l\'historique des versements');
+    }
+  }
+
+  // ==================== 5. Récupérer les dettes d'un livreur ====================
+  static async getDriverDebts(driverId) {
+    try {
+      const debtsSnapshot = await db.collection('driver_debts')
+        .where('driverId', '==', driverId)
+        .orderBy('createdAt', 'desc')
+        .get();
+
+      const debts = debtsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+
+      const pendingDebts = debts.filter(d => d.status === 'pending');
+      const paidDebts = debts.filter(d => d.status === 'paid');
+
+      return {
+        success: true,
+        data: {
+          debts,
+          summary: {
+            totalPending: pendingDebts.reduce((sum, d) => sum + d.amount, 0),
+            totalPaid: paidDebts.reduce((sum, d) => sum + d.amount, 0),
+            count: debts.length,
+            pendingCount: pendingDebts.length
+          }
+        }
+      };
+    } catch (error) {
+      console.error('Erreur récupération dettes:', error);
+      throw new Error('Erreur lors de la récupération des dettes');
+    }
+  }
+
+  // ==================== 6. Marquer une dette comme payée (lors du paiement de salaire) ====================
+  static async markDebtAsPaid(debtId, paidBy, paymentReference) {
+    try {
+      await db.collection('driver_debts').doc(debtId).update({
+        status: 'paid',
+        paidAt: new Date(),
+        paidBy,
+        paymentReference,
+        updatedAt: new Date()
+      });
+
+      return {
+        success: true,
+        message: 'Dette marquée comme payée'
+      };
+    } catch (error) {
+      console.error('Erreur marquage dette:', error);
+      throw new Error('Erreur lors du marquage de la dette');
     }
   }
 }
